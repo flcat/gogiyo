@@ -84,7 +84,7 @@ public class LivestockProductPriceService {
             uriBuilder.queryParam("p_country_code", countryCode);
         }
         if (StringUtils.hasText(regDay)) {
-            // TODO: regDay 형식(YYYY-MM-DD) 검증 로직 추가 필요. 현재는 Api 서버 에러에 의존. 불필요한 Api 호출 가능성 있음
+            // TODO: regDay 형식(YYYY-MM-DD) 검증 로직 추가 필요. 현재는 Api 서버 에러에 의존. 불필요한 Api 호출 존재.
             uriBuilder.queryParam("p_regday", regDay);
         }
         String requestUrl = uriBuilder.toUriString();
