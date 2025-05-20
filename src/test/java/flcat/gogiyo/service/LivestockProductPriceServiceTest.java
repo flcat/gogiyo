@@ -3,6 +3,7 @@ package flcat.gogiyo.service;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -10,10 +11,9 @@ import static org.mockito.Mockito.when;
 import flcat.gogiyo.dto.ExternalApiResponse;
 import flcat.gogiyo.dto.ExternalApiResponse.DataContent;
 import flcat.gogiyo.dto.ItemPriceInfo;
-import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
-import org.junit.jupiter.api.AfterAll;
+import lombok.extern.slf4j.Slf4j;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -31,9 +31,13 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
-@ExtendWith(MockitoExtension.class)
-class LivestockProductServiceTest {
 
+@Slf4j
+@ExtendWith(MockitoExtension.class)
+class LivestockProductPriceServiceTest {
+
+    // 테스트용 상수
+    private static final int MAX_RETRY_ATTEMPTS_FOR_TEST = 2;
     //  테스트 대상 클래스, @Mock 으로 선언된 객체들이 이 클래스에 주입됨
     @InjectMocks
     private LivestockProductPriceService livestockProductPriceService;
@@ -60,16 +64,16 @@ class LivestockProductServiceTest {
     private String apiId = "test-api-id";
     private String baseUrl = "http://localhost:8080/test-api";
 
-    // MockServer: 실제 Http 서버를 띄우지 않고 Http 요청/응답을 시뮬레이션함.
-    // WebClient 테스트 시 유용하지만, 여기서는 WebClient 자체를 모킹하는 방식으로 진행함. Why?
-    // 만약 MockWebServer 사용 시
-    // public static MockWebServer mockBackEnd;
-    // @BeforeAll static void setUp() throws IOException { mockBackEnd = new MockWebServer(); mockBackEnd.start(); }
-    // @AfterAll static void tearDown() throws IOException { mockBackEnd.shutDown(); }
-    // @BeforeEach void initialize() { baseUrl = String.format("http://localhost:%s", mockBackEnd.getPort()); }
+    // WebClient 테스트 전략: 현재는 Mockito로 WebClient 자체를 모킹.
+    // MockWebServer 사용도 고려했었음.
+    //   - 장점: 실제 HTTP 요청/응답 시뮬레이션 가능, 좀 더 통합 테스트에 가까움.
+    //   - 단점: 외부 라이브러리 의존성 추가, 테스트 설정/실행 시간 증가 가능성.
+    // 현재 단계에서는 단위 테스트 본질(의존성 격리, 서비스 로직 집중)을 위해 Mockito 선택.
 
     @BeforeEach
     void setUp() {
+
+        log.debug("테스트 설정 시작: @Value 필드 값 주입 및 WebClient Mock 설정");
 
         // @Value 필드 값 설정. 테스트 대상 객체가 생성된 후(@InjectMocks)에 설정해야 함
         ReflectionTestUtils.setField(livestockProductPriceService, "apiKey", apiKey);
@@ -108,9 +112,7 @@ class LivestockProductServiceTest {
             // responseSpec.bodyToMono(ExternalApiResponse.class) 호출 시 > mockApiresponse 를 담은 Mono 반환 설정
             when(responseSpec.bodyToMono(ExternalApiResponse.class)).thenReturn(
                 Mono.just(mockApiResponse));
-            // onStatus 는 에러가 아닐 때는 호출되지 않도록, 혹은 정상 응답을 그대로 통과시키도록 설정
-            // 좀 더 정확하려면 onStatus 도 모킹 필요함
-            // when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+            // 서비스 코드에서 HttpStatusCode::isError로 체크하므로, 정상 응답 시에는 onStatus의 에러 핸들러가 동작 안 함.
 
             // when : 테스트 대상 메소드 실행
             Mono<List<ItemPriceInfo>> resultMono = livestockProductPriceService.getPriceInfo("02",
@@ -158,19 +160,16 @@ class LivestockProductServiceTest {
                 HttpStatus.BAD_REQUEST.getReasonPhrase(),
                 HttpHeaders.EMPTY, null, null);
 
-            when(responseSpec.onStatus(any(), any())).thenReturn(
-                (ResponseSpec) Mono.error(mockException));
+            when(responseSpec.bodyToMono(ExternalApiResponse.class)).thenReturn(Mono.error(mockException));
 
             // when
             Mono<List<ItemPriceInfo>> resultMono = livestockProductPriceService.getPriceInfo("02",
                 "500", "잘못된지역코드", null, "N");
 
+            // then
             StepVerifier.create(resultMono)
                 .expectNextMatches(List::isEmpty)
                 .verifyComplete();
-
-            // 이런 간단한 방법도 있음.
-            // when(requestHeadersSpec.retrieve()).thenReturn(Mono.error(mockException));
         }
 
         @Test
@@ -191,15 +190,9 @@ class LivestockProductServiceTest {
             successResponse.setData(successDataContent);
 
             // 첫번쨰 retrieve() 는 서버 에러 Mono 반환, 두번째 retrieve() 는 성공 Mono 반환
-            when(requestHeadersSpec.retrieve())
-                .thenReturn((ResponseSpec) Mono.error(serverException)) // 첫번째 호출 시 에러
-                .thenReturn(responseSpec); // 두번째 호출 시 정상 responseSpec
-
-            // 두번째 호출 시 responseSpec 은 성공 응답을 반환하도록 추가 설정
-            when(responseSpec.bodyToMono(ExternalApiResponse.class)).thenReturn(
-                Mono.just(successResponse));
-            // 재시도 시 onStatus 는 에러를 발생시키지 않아야 함
-            // when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec); // 명시적으로
+            when(responseSpec.bodyToMono(ExternalApiResponse.class))
+                .thenReturn(Mono.error(serverException)) // 첫번째 호출 시 에러
+                .thenReturn(Mono.just(successResponse)); // 두번째 호출 시 정상 responseSpec
 
             // when
             Mono<List<ItemPriceInfo>> resultMono = livestockProductPriceService.getPriceInfo("02",
@@ -219,19 +212,194 @@ class LivestockProductServiceTest {
         @Test
         @DisplayName("Api 호출 시 Http 5xx 서버 에러 발생 및 모든 재시도 실패하는 경우")
         void getPriceInfoServerErrorAllRetriesFail() {
+            // given : 모든 Api 호출이 500 서버 에러를 반한하는 경우
+            WebClientResponseException serverException = new WebClientResponseException(
+                "Mock 500 Error", HttpStatus.INTERNAL_SERVER_ERROR.value(), "Internal Server Error",
+                null, null, null);
 
+            // retrieve() 가 호출될 때마다 항상 서버 에러 Mono 반환
+            when(responseSpec.bodyToMono(ExternalApiResponse.class)
+                .thenReturn(Mono.error(serverException)));
+
+            // when
+            Mono<List<ItemPriceInfo>> resultMono = livestockProductPriceService.getPriceInfo("02",
+                "500", null, null, "N");
+
+            // then : 모든 재시도 실패 후 서비스는 빈리스트를 반환 함
+            StepVerifier.create(resultMono)
+                .expectNextMatches(List::isEmpty)
+                .verifyComplete();
+
+            verify(webClient,
+                times(LivestockProductPriceServiceTest.MAX_RETRY_ATTEMPTS_FOR_TEST + 1)).get();
         }
 
         @Test
         @DisplayName("regDay 파라미터가 유효한 형식일 경우")
         void getPriceInfoWithValidRegDay() {
+            // given
+            ExternalApiResponse mockApiResponse = new ExternalApiResponse(); // 호출 경로 확인용
+            mockApiResponse.setCondition("000");
+            mockApiResponse.setData(new ExternalApiResponse.DataContent());
 
+            when(responseSpec.bodyToMono(ExternalApiResponse.class)).thenReturn(
+                Mono.just(mockApiResponse));
+
+            String validRegDay = "2025-05-20";
+
+            // when
+            livestockProductPriceService.getPriceInfo("02", "500", null, validRegDay, "N")
+                .subscribe();
+            // then : UriComponentsBuilder 가 p_regday 파라미터를 포함하여 url 을 생성했는지 확인
+            verify(requestHeadersUriSpec).uri(argThat((String uriString) -> uriString.contains("p_regday=" + validRegDay)));
         }
 
         @Test
         @DisplayName("regDay 파라미터가 잘못된 형식일 경우 Api 호출 시 regDay 파라미터 제외")
         void getPRiceInfoWithInvalidRegDayExcludesParam() {
+            // given
+            ExternalApiResponse mockApiResponse = new ExternalApiResponse();
+            mockApiResponse.setCondition("000");
+            mockApiResponse.setData(new ExternalApiResponse.DataContent());
 
+            when(responseSpec.bodyToMono(ExternalApiResponse.class)).thenReturn(
+                Mono.just(mockApiResponse));
+
+            String invalidRegDay = "20250520"; //(잘못된 형식일 경우)
+
+            // when
+            livestockProductPriceService.getPriceInfo("02", "500", null, invalidRegDay, "N")
+                .subscribe();
+
+            // then : p_regday 파라미터가 uri 에서 제외되었는지 검증
+            // argThat 으로 p_regday= 부재 확인
+            verify(requestHeadersUriSpec).uri(argThat((String uriString) -> !uriString.contains("p_regday=")));
+        }
+    }
+
+    @Nested
+    @DisplayName("getNationalWholesaleLivestockPrice 메소드 테스트")
+    class GetNationalWholesaleLivestockPriceTests {
+
+
+        @BeforeEach
+        void setUpForFilteringTests() {
+
+            // getPriceInfo 가 특정 아이템 리스트를 반환하도록 모킹
+
+            // 더미 데이터
+            ItemPriceInfo beef1 = new ItemPriceInfo();
+            beef1.setItemCode("4301");
+            beef1.setItemName("한우등심");
+            ItemPriceInfo beef2 = new ItemPriceInfo();
+            beef2.setItemCode("4401");
+            beef2.setItemName("수입소갈비");
+            ItemPriceInfo pork1 = new ItemPriceInfo();
+            pork1.setItemCode("4304");
+            pork1.setItemName("돼지삼겹살");
+            ItemPriceInfo pork2 = new ItemPriceInfo();
+            pork2.setItemCode("4402");
+            pork2.setItemName("수입돼지목살");
+            ItemPriceInfo chicken1 = new ItemPriceInfo();
+            chicken1.setItemCode("9901");
+            chicken1.setItemName("닭고기");
+            ItemPriceInfo otherItem1 = new ItemPriceInfo();
+            otherItem1.setItemCode("1234");
+            otherItem1.setItemName("기타품목");
+
+            List<ItemPriceInfo> allItems = List.of(beef1, beef2, pork1, pork2, chicken1,
+                otherItem1);
+
+            ExternalApiResponse.DataContent dataContent = new DataContent();
+            dataContent.setItems(allItems);
+            ExternalApiResponse mockApiResponse = new ExternalApiResponse();
+            mockApiResponse.setCondition("000");
+            mockApiResponse.setData(dataContent);
+
+            // getPriceInfo 내부의 WebClient 호출이 이 mockApiResponse 를 반환하도록 설정
+            when(responseSpec.bodyToMono(ExternalApiResponse.class)).thenReturn(
+                Mono.just(mockApiResponse));
+        }
+
+        @Test
+        @DisplayName("소고기 필터링 성공 시")
+        void filterBeefSuccess(){
+            // when
+            Mono<List<ItemPriceInfo>> resultMono = livestockProductPriceService.getNationalWholesaleLivestockPrice(
+                "beef", null);
+
+            // then
+            StepVerifier.create(resultMono)
+                .expectNextMatches(list -> list.size() == 2 && list.stream().allMatch(
+                    item -> item.getItemCode().equals("4301") || item.getItemCode()
+                        .equals("4401")))
+                .verifyComplete();
+        }
+
+        @Test
+        @DisplayName("돼지고기 필터링 성공 시")
+        void filterPorkSuccess(){
+            // when
+            Mono<List<ItemPriceInfo>> resultMono = livestockProductPriceService.getNationalWholesaleLivestockPrice(
+                "pork", null);
+
+            // then
+            StepVerifier.create(resultMono)
+                .expectNextMatches(list -> list.size() == 2 && list.stream().allMatch(
+                    item -> item.getItemCode().equals("4304") || item.getItemCode()
+                        .equals("4402")))
+                .verifyComplete();
+        }
+
+        @Test
+        @DisplayName("닭고기 필터링 성공 시")
+        void filterChickenSuccess(){
+            // when
+            Mono<List<ItemPriceInfo>> resultMono = livestockProductPriceService.getNationalWholesaleLivestockPrice(
+                "chicken", null);
+
+            // then
+            StepVerifier.create(resultMono)
+                .expectNextMatches(list -> list.size() == 1 && list.stream().allMatch(
+                    item -> item.getItemCode().equals("9901")))
+                .verifyComplete();
+        }
+
+        @Test
+        @DisplayName("지원하지 않는 코드 필터링 시 빈 리스트 반환")
+        void filterUnknownTypeReturnsEmptyList(){
+            // when
+            Mono<List<ItemPriceInfo>> resultMono = livestockProductPriceService.getNationalWholesaleLivestockPrice(
+                "unknown", null);
+
+            // then
+            StepVerifier.create(resultMono)
+                .expectNextMatches(List::isEmpty)
+                .verifyComplete();
+        }
+
+        @Test
+        @DisplayName("getPriceInfo 가 빈리스트 반환 시 필터링 결과도 빈리스트 반환")
+        void filterWhenApiReturnEmptyReturnEmptyList() {
+            // given : getPriceInfo 가 빈리스트를 반환하도록 WebClient 모킹 재설정
+            ExternalApiResponse.DataContent emptyDataContent = new ExternalApiResponse.DataContent();
+            emptyDataContent.setItems(Collections.emptyList());
+
+            ExternalApiResponse emptyApiResponse = new ExternalApiResponse();
+            emptyApiResponse.setCondition("001"); // 데이터 없음
+            emptyApiResponse.setData(emptyDataContent);
+
+            when(responseSpec.bodyToMono(ExternalApiResponse.class)).thenReturn(
+                Mono.just(emptyApiResponse));
+
+            // when
+            Mono<List<ItemPriceInfo>> resultMono = livestockProductPriceService.getNationalWholesaleLivestockPrice(
+                "beef", null);
+
+            // then
+            StepVerifier.create(resultMono)
+                .expectNextMatches(List::isEmpty)
+                .verifyComplete();
         }
     }
 }
