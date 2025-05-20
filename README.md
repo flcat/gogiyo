@@ -21,7 +21,7 @@ Spring Boot와 WebFlux를 사용해 외부 API에서 축산물 가격 정보를 
 
 * **언어:** Java 17
 * **프레임워크:** Spring Boot 3.x.x
-    * Spring WebFlux (Netty 기반) - *혹시 프로젝트가 MVC 기반이라면 "Spring MVC (Tomcat 기반)"으로 수정해주세요.*
+    * Spring WebFlux Spring MVC (Tomcat 기반)*
     * Project Reactor (`Mono`, `Flux`)
 * **HTTP 클라이언트:** `WebClient`
 * **로깅:** SLF4J + Logback (Lombok `@Slf4j` 사용)
